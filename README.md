@@ -6,7 +6,7 @@
 <p align="center"><b>Paralives save → floor plans</b> · real, printable plans of the houses in your game</p>
 
 <p align="center">
-  <img src="docs/screenshot.png" width="720" alt="paraplan showing a four-storey premade house as a floor plan sheet">
+  <img src="docs/screenshot.png" width="720" alt="paraplan showing a premade house with three buildings, wall lengths and the measurements panel">
 </p>
 
 paraplan reads a **Paralives** save and draws its buildings as proper architectural floor plans: walls at their

@@ -362,7 +362,9 @@ fn bool open(String path) => @pool()
 	path = txt::view(&real);
 	txt::set(&save_path, path);
 	String base = txt::basename(path);
-	txt::set(&save_name, txt::iends_with(base, ".saved") ? base[:base.len - 6] : txt::strip_ext(base));
+	// a single .lot: name it after its folder (a GUID file name says nothing)
+	String sn = txt::iends_with(base, ".saved") ? base[:base.len - 6] : sys::is_file(path) ? txt::basename(txt::dirname(path)) : txt::strip_ext(base);
+	txt::set(&save_name, sn);
 	if (sys::is_file(path))
 	{
 		if (!txt::iends_with(path, ".lot")) { txt::set(&load_error, "Not a Paralives .lot file"); return false; }

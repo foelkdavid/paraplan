@@ -65,6 +65,7 @@ bool dragging;
 plan::Vec press_at;
 bool pressed;
 bool png_pending;
+bool view_moved;        // the user zoomed or dragged since the last fit: a resize keeps their view
 
 ui::Shortcut[*] help_rows = {
 	{ "PLAN", "", true },
@@ -283,6 +284,7 @@ fn void fit()
 {
 	Rect c = canvas_rect;
 	if (plan::sheet_w <= 0 || c.width <= 0) return;
+	view_moved = false;
 	zoom = math::min((c.width - 40) / plan::sheet_w, (c.height - 40) / plan::sheet_h);
 	cam = { plan::sheet_w / 2 - c.width / 2 / zoom, plan::sheet_h / 2 - c.height / 2 / zoom };
 }
@@ -348,8 +350,9 @@ fn void frame() => @pool()
 	canvas_rect = { SIDE_W, TOP_H, w - SIDE_W, h - TOP_H - STATUS_H };
 	if (prev.width != canvas_rect.width || prev.height != canvas_rect.height)
 	{
-		// keep the centre when the window resizes
-		cam += plan::vec(prev.width - canvas_rect.width, prev.height - canvas_rect.height) / (2 * zoom);
+		// untouched view: fit again (the window settles its size after opening); else keep the centre
+		if (!view_moved) { fit(); }
+		else { cam += plan::vec(prev.width - canvas_rect.width, prev.height - canvas_rect.height) / (2 * zoom); }
 	}
 	shortcuts();
 	canvas();
@@ -689,6 +692,7 @@ fn void canvas()
 		{
 			plan::Vec before = to_sheet(m);
 			zoom = math::clamp(zoom * math::pow(1.15f, wheel), 2.0f, 2000.0f);
+			view_moved = true;
 			plan::Vec after = to_sheet(m);
 			cam += before - after;
 		}
@@ -710,6 +714,7 @@ fn void canvas()
 			{
 				rl::RLVector2 d = rl::get_mouse_delta();
 				cam -= plan::vec(d.x, d.y) / (zoom * ui::scale);
+				view_moved = true;
 				ui::cursor = rl::RLMouseCursor.RESIZE_ALL;
 			}
 		}
