@@ -154,18 +154,34 @@ fn void init()
 fn String lib(int i) => txt::view(&libs[i].s);
 
 // Steam libraries -> saves and the game install. Cheap (a few stats + one directory listing per library).
+// Linux: the game runs in Proton, its saves sit in the Steam library's compatdata prefix. Windows / macOS: the
+// game's own data folder (Unity persistentDataPath) and the usual Steam folders.
 fn void discover() => @pool()
 {
 	lib_count = 0;
 	save_count = 0;
 	game_dir[0] = 0;
 	String home = sys::home();
-	String[4] roots = {
-		txt::join(home, ".local/share/Steam"),
-		txt::join(home, ".steam/root"),
-		txt::join(home, ".steam/steam"),
-		txt::join(home, ".var/app/com.valvesoftware.Steam/data/Steam"),
-	};
+	$if env::WIN32:
+		String pf86 = sys::env("ProgramFiles(x86)");
+		String pf = sys::env("ProgramFiles");
+		String[4] roots = {
+			pf86.len ? txt::join(pf86, "Steam") : "C:/Program Files (x86)/Steam",
+			pf.len ? txt::join(pf, "Steam") : "C:/Program Files/Steam",
+			"C:/Steam",
+			"D:/Steam",
+		};
+	$else $if env::DARWIN:
+		String[1] roots = { txt::join(home, "Library/Application Support/Steam") };
+	$else
+		String[4] roots = {
+			txt::join(home, ".local/share/Steam"),
+			txt::join(home, ".steam/root"),
+			txt::join(home, ".steam/steam"),
+			txt::join(home, ".var/app/com.valvesoftware.Steam/data/Steam"),
+		};
+	$endif
+	$endif
 	foreach (r : roots)
 	{
 		if (!sys::is_dir(txt::join(r, "steamapps"))) continue;
@@ -173,24 +189,63 @@ fn void discover() => @pool()
 		String? vdf = sys::read_temp(txt::join(r, "steamapps/libraryfolders.vdf"));
 		if (catch vdf) continue;
 		sz pos = 0;
-		while (try v = vdf_next(vdf, "path", &pos)) add_lib(v);
+		while (try v = vdf_next(vdf, "path", &pos)) add_lib(unescape_vdf(v));
 	}
 	for (int i = 0; i < lib_count; i++)
 	{
 		String g = txt::join(lib(i), GAME_SUB);
-		if (txt::empty(&game_dir) && sys::is_dir(txt::join(g, "Main.mod"))) txt::set(&game_dir, g);
-		String dir = txt::join(lib(i), SAVES_SUB);
-		sys::Entry[] ents = mem::talloc_array(sys::Entry, 256);
-		int n = sys::list_dir(dir, ents, false);
-		for (int k = 0; k < n && save_count < MAX_SAVES; k++)
+		// the folder holding Main.mod (macOS: inside the app bundle)
+		String[4] subs = { "", "Paralives.app/Contents", "Paralives.app/Contents/Resources", "Paralives.app/Contents/Resources/Data" };
+		foreach (sub : subs)
 		{
-			String name = txt::view(&ents[k].name);
-			if (!ents[k].dir || !txt::iends_with(name, ".saved")) continue;
-			SaveRef* s = &saves[save_count++];
-			txt::set(&s.path, txt::join(dir, name));
-			txt::set(&s.name, name[:name.len - 6]);
+			String d = sub.len ? txt::join(g, sub) : g;
+			if (txt::empty(&game_dir) && sys::is_dir(txt::join(d, "Main.mod"))) txt::set(&game_dir, d);
 		}
+		$if env::LINUX:
+			add_saves(txt::join(lib(i), SAVES_SUB));
+		$endif
 	}
+	$if env::WIN32:
+		add_saves(txt::join(home, "AppData/LocalLow/Paralives/Paralives/MySavedGames.mod"));
+	$endif
+	$if env::DARWIN:
+		add_saves(txt::join(home, "Library/Application Support/Paralives/Paralives/MySavedGames.mod"));
+		add_saves(txt::join(home, "Library/Application Support/com.Paralives.Paralives/MySavedGames.mod"));
+	$endif
+}
+
+// Every `<name>.saved` folder in `dir`.
+fn void add_saves(String dir) => @pool()
+{
+	sys::Entry[] ents = mem::talloc_array(sys::Entry, 256);
+	int n = sys::list_dir(dir, ents, false);
+	for (int k = 0; k < n && save_count < MAX_SAVES; k++)
+	{
+		String name = txt::view(&ents[k].name);
+		if (!ents[k].dir || !txt::iends_with(name, ".saved")) continue;
+		SaveRef* s = &saves[save_count++];
+		txt::set(&s.path, txt::join(dir, name));
+		txt::set(&s.name, name[:name.len - 6]);
+	}
+}
+
+// libraryfolders.vdf escapes backslashes ("D:\\SteamLibrary"): -> "D:/SteamLibrary" (temp).
+fn String unescape_vdf(String v)
+{
+	if (!v.contains("\\")) return v;
+	DString d;
+	d.tinit();
+	for (sz i = 0; i < v.len; i++)
+	{
+		if (v[i] == '\\')
+		{
+			d.append_char('/');
+			if (i + 1 < v.len && v[i + 1] == '\\') i++;
+			continue;
+		}
+		d.append_char(v[i]);
+	}
+	return d.str_view();
 }
 
 fn void add_lib(String p)

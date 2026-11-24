@@ -28,6 +28,12 @@ side on one sheet.
 
 **Press `Ctrl + K`** for all keyboard shortcuts and the About page.
 
+## Download
+
+Ready builds are on the [releases page](https://github.com/foelkdavid/paraplan/releases): Linux (Wayland),
+Windows x64, macOS (Apple Silicon and Intel). Linux is where paraplan is made and tested; the Windows and macOS
+builds come from CI and look for the saves in the game's usual folders there.
+
 ## Requirements to run
 
 - Linux x86_64 with a **Wayland** session (no X11 / XWayland)

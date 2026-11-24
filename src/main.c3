@@ -86,7 +86,15 @@ ui::Shortcut[*] help_rows = {
 fn String config_dir()
 {
 	String x = sys::env("XDG_CONFIG_HOME");
-	return x.len ? txt::join(x, "paraplan") : txt::join(sys::home(), ".config/paraplan");
+	if (x.len) return txt::join(x, "paraplan");
+	$if env::WIN32:
+		String a = sys::env("APPDATA");
+		if (a.len) return txt::join(a, "paraplan");
+	$endif
+	$if env::DARWIN:
+		return txt::join(sys::home(), "Library/Application Support/paraplan");
+	$endif
+	return txt::join(sys::home(), ".config/paraplan");
 }
 
 bool batch;     // --export: never write settings

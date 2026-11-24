@@ -1,0 +1,157 @@
+# Release builds: Linux (Wayland), Windows x64, macOS (Apple Silicon + Intel).
+# Push a tag v* -> builds all, then publishes a GitHub release with the archives. Run by hand (Actions tab ->
+# release -> Run workflow) to build without publishing (archives stay as workflow artifacts).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  C3_VERSION: v0.8.6
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, name: linux-x64-wayland }
+          - { os: windows-latest, name: windows-x64 }
+          - { os: macos-14, name: macos-arm64 }
+          - { os: macos-15-intel, name: macos-x64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch bmu (submodule, SSH URL -> HTTPS)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init
+
+      - name: Version
+        run: echo "VERSION=$(python3 -c 'import json; print(json.load(open("project.json"))["version"])')" >> "$GITHUB_ENV"
+
+      # --- Linux ---------------------------------------------------------------------------------------------
+      - name: Linux toolchain and raylib (Wayland)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential pkg-config libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libegl-dev libgl-dev
+          curl -sL "https://github.com/c3lang/c3c/releases/download/${C3_VERSION}/c3-linux.tar.gz" | tar xz -C "$HOME"
+          echo "$HOME/c3" >> "$GITHUB_PATH"
+          bmu/dev/tools/build-raylib.sh
+
+      - name: Linux build
+        if: runner.os == 'Linux'
+        run: |
+          c3c build paraplan
+          d="paraplan-${VERSION}-${{ matrix.name }}"
+          mkdir -p "$d"
+          cp build/paraplan README.md paraplan.desktop assets/paraplan.svg "$d/"
+          cp -r licenses "$d/"
+          tar czf "$d.tar.gz" "$d"
+          echo "PKG=$d.tar.gz" >> "$GITHUB_ENV"
+
+      # --- Windows -------------------------------------------------------------------------------------------
+      - name: Windows toolchain and raylib
+        if: runner.os == 'Windows'
+        run: |
+          curl -sL -o c3.zip "https://github.com/c3lang/c3c/releases/download/${C3_VERSION}/c3-windows.zip"
+          7z x -y -o"$HOME/c3" c3.zip > /dev/null
+          c3dir=$(dirname "$(find "$HOME/c3" -name c3c.exe | head -1)")
+          echo "$c3dir" >> "$GITHUB_PATH"
+          bmu/dev/tools/build-raylib-other.sh windows
+
+      - name: Windows build
+        if: runner.os == 'Windows'
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"   # keep /ENTRY:... as is (Git Bash would turn it into a path)
+        run: |
+          c3c build paraplan --win-subsystem=windows -z /ENTRY:mainCRTStartup
+          d="paraplan-${VERSION}-${{ matrix.name }}"
+          mkdir -p "$d"
+          cp build/paraplan.exe README.md "$d/"
+          cp -r licenses "$d/"
+          7z a "$d.zip" "$d" > /dev/null
+          echo "PKG=$d.zip" >> "$GITHUB_ENV"
+
+      # --- macOS ---------------------------------------------------------------------------------------------
+      - name: macOS toolchain and raylib
+        if: runner.os == 'macOS'
+        run: |
+          curl -sL -o c3.zip "https://github.com/c3lang/c3c/releases/download/${C3_VERSION}/c3-macos.zip"
+          unzip -q c3.zip -d "$HOME/c3"
+          c3dir=$(dirname "$(find "$HOME/c3" -name c3c -type f | head -1)")
+          echo "$c3dir" >> "$GITHUB_PATH"
+          bmu/dev/tools/build-raylib-other.sh macos
+
+      - name: macOS build (app bundle, ad-hoc signed)
+        if: runner.os == 'macOS'
+        run: |
+          c3c build paraplan --macos-min-version 11.0
+          app=paraplan.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp build/paraplan "$app/Contents/MacOS/paraplan"
+          cp -r licenses README.md "$app/Contents/Resources/"
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>paraplan</string>
+            <key>CFBundleDisplayName</key><string>paraplan</string>
+            <key>CFBundleIdentifier</key><string>com.github.foelkdavid.paraplan</string>
+            <key>CFBundleExecutable</key><string>paraplan</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          EOF
+          codesign --force --deep -s - "$app"
+          d="paraplan-${VERSION}-${{ matrix.name }}"
+          ditto -c -k --keepParent "$app" "$d.zip"
+          echo "PKG=$d.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.PKG }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body: |
+            paraplan ${{ github.ref_name }}: Paralives saves -> floor plans (SVG at true scale, PNG).
+
+            New: several buildings per lot (show one or all), turned buildings drawn straight ("Align to the building"),
+            the length of every wall, room perimeters and per-level totals, a sidebar whose sections fold away,
+            stairs drawn the right way up.
+
+            | Download | System |
+            |---|---|
+            | `paraplan-*-linux-x64-wayland.tar.gz` | Linux x86_64, Wayland session (no X11) |
+            | `paraplan-*-windows-x64.zip` | Windows 10/11, 64-bit |
+            | `paraplan-*-macos-arm64.zip` | macOS 11+ on Apple Silicon |
+            | `paraplan-*-macos-x64.zip` | macOS 11+ on Intel |
+
+            macOS: the app is not notarized. After unzipping, right-click paraplan.app -> Open (once), or run
+            `xattr -dr com.apple.quarantine paraplan.app`.
+            Windows: SmartScreen may warn about an unknown publisher -> "More info" -> "Run anyway".
