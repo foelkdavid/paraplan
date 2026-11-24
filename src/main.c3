@@ -24,8 +24,20 @@ struct Settings
 	bool furniture;
 	bool dims;
 	bool labels;
+	bool wall_lens;
+	bool perims;
+	bool align;
+	// sidebar sections: open (true) or folded
+	bool sec_saves;
+	bool sec_lots;
+	bool sec_blds;
+	bool sec_levels;
+	bool sec_meas;
+	bool sec_plan;
+	bool sec_export;
 }
-Settings settings = { .scale_sel = 1, .furniture = true, .dims = true, .labels = true };
+Settings settings = { .scale_sel = 1, .furniture = true, .dims = true, .labels = true, .wall_lens = true, .align = true,
+	.sec_saves = true, .sec_lots = true, .sec_blds = true, .sec_levels = true, .sec_meas = true, .sec_plan = true, .sec_export = true };
 const int[3] SCALES = { 50, 100, 200 };
 String[3] scale_names = { "1:50", "1:100", "1:200" };
 
@@ -38,6 +50,7 @@ struct RoomName
 List{RoomName} room_names;
 
 bool[model::MAX_LEVELS] level_on;
+int sel_bld = -1;       // building of the lot shown, -1 = all
 int sel_room = -1;
 char[64] room_buf;
 float side_scroll;
@@ -59,7 +72,8 @@ ui::Shortcut[*] help_rows = {
 	{ "Drag", "Move the sheet", false },
 	{ "Click a room", "Select it (rename in the sidebar)", false },
 	{ "F / Home", "Fit the sheet", false },
-	{ "Up / Down", "Previous / next building", false },
+	{ "Up / Down", "Previous / next lot", false },
+	{ "B / Shift + B", "Next / previous building of the lot (or all)", false },
 	{ "FILES", "", true },
 	{ "Ctrl + O", "Open a save folder", false },
 	{ "Ctrl + E", "Export SVG (true scale)", false },
@@ -87,6 +101,10 @@ fn void settings_save() => @pool()
 	s.appendf("last=%s\n", txt::view(&settings.last));
 	s.appendf("scale=%d\n", settings.scale_sel);
 	s.appendf("furniture=%d\ndims=%d\nlabels=%d\n", settings.furniture ? 1 : 0, settings.dims ? 1 : 0, settings.labels ? 1 : 0);
+	s.appendf("wall_lengths=%d\nperimeters=%d\nalign=%d\n", settings.wall_lens ? 1 : 0, settings.perims ? 1 : 0, settings.align ? 1 : 0);
+	s.appendf("open_saves=%d\nopen_lots=%d\nopen_buildings=%d\nopen_levels=%d\nopen_measurements=%d\nopen_plan=%d\nopen_export=%d\n",
+		settings.sec_saves ? 1 : 0, settings.sec_lots ? 1 : 0, settings.sec_blds ? 1 : 0, settings.sec_levels ? 1 : 0,
+		settings.sec_meas ? 1 : 0, settings.sec_plan ? 1 : 0, settings.sec_export ? 1 : 0);
 	sys::mkdirs(config_dir());
 	if (!sys::write_file(txt::join(config_dir(), "settings.ini"), s.str_view())) ui::toast("Could not save settings", ui::RED);
 }
@@ -111,6 +129,16 @@ fn void settings_load() => @pool()
 				case "furniture": settings.furniture = val == "1";
 				case "dims": settings.dims = val == "1";
 				case "labels": settings.labels = val == "1";
+				case "wall_lengths": settings.wall_lens = val == "1";
+				case "perimeters": settings.perims = val == "1";
+				case "align": settings.align = val == "1";
+				case "open_saves": settings.sec_saves = val == "1";
+				case "open_lots": settings.sec_lots = val == "1";
+				case "open_buildings": settings.sec_blds = val == "1";
+				case "open_levels": settings.sec_levels = val == "1";
+				case "open_measurements": settings.sec_meas = val == "1";
+				case "open_plan": settings.sec_plan = val == "1";
+				case "open_export": settings.sec_export = val == "1";
 			}
 		}
 	}
@@ -174,13 +202,38 @@ fn void set_room_name(int ri, String name)
 fn void rebuild() => @pool()
 {
 	if (model::cur_lot < 0) { plan::reset(); plan::sheet_w = 0; return; }
-	plan::Options o = { .scale = SCALES[settings.scale_sel], .furniture = settings.furniture, .dims = settings.dims, .labels = settings.labels };
+	plan::Options o = { .scale = SCALES[settings.scale_sel], .furniture = settings.furniture, .dims = settings.dims, .labels = settings.labels,
+		.wall_lens = settings.wall_lens, .perims = settings.perims, .align = settings.align, .bld = sel_bld };
 	o.level_on = level_on;
 	model::Lot* l = &model::lots[model::cur_lot];
 	float total = 0;
-	foreach (&r : model::rooms) if (level_index(r.layer) >= 0 && level_on[level_index(r.layer)]) total += r.area;
-	String sub = string::tformat("Floor plan  ·  %s  ·  %.1f m² floor area  ·  paraplan", txt::view(&model::save_name), total);
-	plan::build(o, txt::view(&l.name), sub);
+	float wl = 0;
+	foreach (&r : model::rooms) if (level_on_for(r.layer) && (sel_bld < 0 || r.bld == sel_bld)) total += r.area;
+	foreach (&w : model::walls) if (!w.fence && level_on_for(w.layer) && (sel_bld < 0 || w.bld == sel_bld)) wl += w.len;
+	String sub = string::tformat("Floor plan  ·  %s  ·  %.1f m² floor area", txt::view(&model::save_name), total);
+	if (settings.wall_lens) sub = string::tformat("%s  ·  %.1f m of walls", sub, wl);
+	sub = string::tformat("%s  ·  paraplan", sub);
+	String title = txt::view(&l.name);
+	if (sel_bld >= 0) title = string::tformat("%s  ·  %s", title, building_name(sel_bld));
+	plan::build(o, title, sub);
+}
+
+fn bool level_on_for(int layer)
+{
+	int i = level_index(layer);
+	return i >= 0 && level_on[i];
+}
+
+// "Building 2" (temp).
+fn String building_name(int b) => string::tformat("Building %d", b + 1);
+
+fn void select_building(int b)
+{
+	if (b < -1 || b >= model::building_count) return;
+	sel_bld = b;
+	if (sel_room >= 0 && b >= 0 && model::rooms[sel_room].bld != b) sel_room = -1;
+	rebuild();
+	fit();
 }
 
 fn int level_index(int layer)
@@ -193,6 +246,7 @@ fn void select_lot(int i)
 {
 	if (i < 0 || i >= model::lot_count) return;
 	sel_room = -1;
+	sel_bld = -1;
 	ui::unfocus();
 	if (!model::load_lot(i)) { ui::toast(txt::view(&model::load_error), ui::RED); }
 	level_on = {};
@@ -255,9 +309,13 @@ fn void main(String[] args)
 		for (int i = 0; i < model::lot_count; i++)
 		{
 			select_lot(i);
-			export_svg();
-			export_png();
-			png_poll(true);
+			for (int b = -1; b < (model::building_count > 1 ? model::building_count : 0); b++)
+			{
+				select_building(b);
+				export_svg();
+				export_png();
+				png_poll(true);
+			}
 		}
 		return;
 	}
@@ -317,6 +375,12 @@ fn void shortcuts()
 	if (ui::letter('f') || rl::is_key_pressed(rl::RLKeyboardKey.HOME)) fit();
 	if (ui::repeat(rl::RLKeyboardKey.DOWN) && model::cur_lot + 1 < model::lot_count) select_lot(model::cur_lot + 1);
 	if (ui::repeat(rl::RLKeyboardKey.UP) && model::cur_lot > 0) select_lot(model::cur_lot - 1);
+	if (ui::letter('b') && model::building_count > 1)
+	{
+		int n = model::building_count + 1;           // -1 (all) .. count-1
+		int step = ui::shift_down() ? n - 1 : 1;
+		select_building((sel_bld + 1 + step) % n - 1);
+	}
 	if (rl::is_key_pressed(rl::RLKeyboardKey.ESCAPE)) sel_room = -1;
 }
 
@@ -404,45 +468,81 @@ fn void sidebar()
 
 	if (model::save_count > 0)
 	{
-		heading("SAVES", x, y);
-		y += 22;
-		for (int i = 0; i < model::save_count; i++)
+		if (section(x, y, iw, "SAVES", &settings.sec_saves, string::tformat("%d", model::save_count))) {}
+		y += 24;
+		if (settings.sec_saves)
 		{
-			bool on = txt::view(&model::saves[i].path) == txt::view(&model::save_path);
-			if (row({ x, y, iw, 32 }, txt::view(&model::saves[i].name), "", on, ui::I_FOLDER) && !on) open_path(txt::view(&model::saves[i].path));
-			y += 34;
+			for (int i = 0; i < model::save_count; i++)
+			{
+				bool on = txt::view(&model::saves[i].path) == txt::view(&model::save_path);
+				if (row({ x, y, iw, 32 }, txt::view(&model::saves[i].name), "", on, ui::I_FOLDER) && !on) open_path(txt::view(&model::saves[i].path));
+				y += 34;
+			}
 		}
 		y += 12;
 	}
 
-	heading("BUILDINGS", x, y);
-	y += 22;
-	if (model::lot_count == 0)
+	section(x, y, iw, "LOTS", &settings.sec_lots, model::lot_count ? string::tformat("%d", model::lot_count) : "");
+	y += 24;
+	if (settings.sec_lots)
 	{
-		ui::text(model::save_count ? "No buildings in this save." : "No Paralives saves found. Open… one.", x, y, 13, ui::GRAY);
-		y += 24;
+		if (model::lot_count == 0)
+		{
+			ui::text(model::save_count ? "No buildings in this save." : "No Paralives saves found. Open… one.", x, y, 13, ui::GRAY);
+			y += 24;
+		}
+		for (int i = 0; i < model::lot_count; i++)
+		{
+			model::Lot* l = &model::lots[i];
+			String d = l.premade ? "premade" : "built in this save";
+			if (l.street) d = string::tformat("No. %d  ·  %s", l.street, d);
+			if (row({ x, y, iw, 44 }, txt::view(&l.name), d, i == model::cur_lot, ui::I_HOME) && i != model::cur_lot) select_lot(i);
+			y += 46;
+		}
 	}
-	for (int i = 0; i < model::lot_count; i++)
+	else if (model::cur_lot >= 0)
 	{
-		model::Lot* l = &model::lots[i];
-		String d = l.premade ? "premade" : "built in this save";
-		if (l.street) d = string::tformat("No. %d  ·  %s", l.street, d);
-		if (row({ x, y, iw, 44 }, txt::view(&l.name), d, i == model::cur_lot, ui::I_HOME) && i != model::cur_lot) select_lot(i);
-		y += 46;
+		// folded: keep the current lot in view
+		model::Lot* l = &model::lots[model::cur_lot];
+		row({ x, y, iw, 32 }, txt::view(&l.name), "", true, ui::I_HOME);
+		y += 34;
 	}
 	y += 12;
 
 	if (model::cur_lot >= 0)
 	{
-		heading("LEVELS", x, y);
-		y += 22;
-		for (int i = 0; i < model::level_count; i++)
+		if (model::building_count > 1)
 		{
-			int nr;
-			foreach (&r : model::rooms) if (r.layer == model::levels[i]) nr++;
-			String s = string::tformat("%s  (%d room%s)", model::level_name(model::levels[i]), nr, nr == 1 ? "" : "s");
-			if (ui::checkbox(x, y, s, &level_on[i])) { rebuild(); fit(); }
-			y += 30;
+			section(x, y, iw, "BUILDINGS", &settings.sec_blds, string::tformat("%d", model::building_count));
+			y += 24;
+			if (settings.sec_blds)
+			{
+				if (row({ x, y, iw, 32 }, "All buildings", "", sel_bld < 0, ui::I_GRID) && sel_bld >= 0) select_building(-1);
+				y += 34;
+				for (int i = 0; i < model::building_count; i++)
+				{
+					model::Building* b = &model::buildings[i];
+					String d = string::tformat("%d level%s  ·  %d room%s  ·  %.1f m²", b.levels, b.levels == 1 ? "" : "s", b.rooms, b.rooms == 1 ? "" : "s", b.area);
+					if (b.angle != 0) d = string::tformat("%s  ·  %.0f°", d, b.angle * 180 / (float)math::PI);
+					if (row({ x, y, iw, 44 }, building_name(i), d, i == sel_bld, ui::I_HOME) && i != sel_bld) select_building(i);
+					y += 46;
+				}
+			}
+			y += 12;
+		}
+
+		section(x, y, iw, "LEVELS", &settings.sec_levels);
+		y += 24;
+		if (settings.sec_levels)
+		{
+			for (int i = 0; i < model::level_count; i++)
+			{
+				int nr;
+				foreach (&r : model::rooms) if (r.layer == model::levels[i] && (sel_bld < 0 || r.bld == sel_bld)) nr++;
+				String s = string::tformat("%s  (%d room%s)", model::level_name(model::levels[i]), nr, nr == 1 ? "" : "s");
+				if (ui::checkbox(x, y, s, &level_on[i])) { rebuild(); fit(); }
+				y += 30;
+			}
 		}
 		y += 12;
 
@@ -463,37 +563,96 @@ fn void sidebar()
 				rebuild();
 			}
 			y += 42;
-			ui::text(string::tformat("%.1f m²  ·  %s", model::rooms[sel_room].area, model::level_name(model::rooms[sel_room].layer)), x, y, 13, ui::GRAY);
+			model::Room* r = model::rooms.get_ref(sel_room);
+			ui::text(string::tformat("%.1f m²  ·  %s", r.area, model::level_name(r.layer)), x, y, 13, ui::GRAY);
+			y += 20;
+			ui::text(string::tformat("Perimeter %.2f m  ·  %d walls", r.perim, r.nseg), x, y, 13, ui::GRAY);
 			y += 30;
 		}
 
-		heading("PLAN", x, y);
-		y += 22;
-		ui::text("Scale", x, y + 9, 15, ui::FG4);
-		if (ui::dropdown(ID_SCALE, { x + 90, y, iw - 90, 36 }, &scale_names, &settings.scale_sel)) { settings_save(); rebuild(); fit(); }
-		y += 46;
-		if (ui::checkbox(x, y, "Room names and areas", &settings.labels)) { settings_save(); rebuild(); }
-		y += 30;
-		if (ui::checkbox(x, y, "Dimensions", &settings.dims)) { settings_save(); rebuild(); fit(); }
-		y += 30;
-		if (ui::checkbox(x, y, "Furniture", &settings.furniture)) { settings_save(); rebuild(); }
-		y += 42;
+		section(x, y, iw, "MEASUREMENTS", &settings.sec_meas);
+		y += 24;
+		if (settings.sec_meas) y = measurements(x, y, iw);
+		y += 12;
 
-		heading("EXPORT TO", x, y);
-		y += 22;
-		ui::text_tail(txt::view(&settings.export_dir), x, y + 9, iw - 48, 13, ui::FG4);
-		if (ui::icon_button({ x + iw - 38, y, 38, 36 }, ui::I_FOLDER_OPEN, ui::FG4, "Choose the export folder"))
+		section(x, y, iw, "PLAN", &settings.sec_plan);
+		y += 24;
+		if (settings.sec_plan)
 		{
-			picker::start(PICK_EXPORT, DIR, "Export floor plans to…", txt::view(&settings.export_dir));
+			ui::text("Scale", x, y + 9, 15, ui::FG4);
+			if (ui::dropdown(ID_SCALE, { x + 90, y, iw - 90, 36 }, &scale_names, &settings.scale_sel)) { settings_save(); rebuild(); fit(); }
+			y += 46;
+			if (ui::checkbox(x, y, "Room names and areas", &settings.labels)) { settings_save(); rebuild(); }
+			y += 30;
+			if (ui::checkbox(x, y, "Room perimeters", &settings.perims, "Length around each room (wall centre lines)")) { settings_save(); rebuild(); }
+			y += 30;
+			if (ui::checkbox(x, y, "Wall lengths", &settings.wall_lens, "Every wall's length (centre line) + totals per level")) { settings_save(); rebuild(); }
+			y += 30;
+			if (ui::checkbox(x, y, "Dimensions", &settings.dims)) { settings_save(); rebuild(); fit(); }
+			y += 30;
+			if (ui::checkbox(x, y, "Furniture", &settings.furniture)) { settings_save(); rebuild(); }
+			y += 30;
+			if (ui::checkbox(x, y, "Align to the building", &settings.align, "One building: turn the sheet so its walls run straight")) { settings_save(); rebuild(); fit(); }
+			y += 30;
 		}
-		y += 44;
-		ui::text("SVG prints at true scale (100 %).", x, y, 12, ui::GRAY);
-		y += 20;
+		y += 12;
+
+		section(x, y, iw, "EXPORT TO", &settings.sec_export);
+		y += 24;
+		if (settings.sec_export)
+		{
+			ui::text_tail(txt::view(&settings.export_dir), x, y + 9, iw - 48, 13, ui::FG4);
+			if (ui::icon_button({ x + iw - 38, y, 38, 36 }, ui::I_FOLDER_OPEN, ui::FG4, "Choose the export folder"))
+			{
+				picker::start(PICK_EXPORT, DIR, "Export floor plans to…", txt::view(&settings.export_dir));
+			}
+			y += 44;
+			ui::text("SVG prints at true scale (100 %).", x, y, 12, ui::GRAY);
+			y += 20;
+		}
 	}
 	ui::end_clip();
 	float content = y + side_scroll - TOP_H;
 	side_scroll = ui::scroll_wheel(area, side_scroll, content);
 	ui::scrollbar(area, side_scroll, content);
+}
+
+// Collapsible heading; a toggle is saved right away.
+fn bool section(float x, float y, float w, String title, bool* open, String detail = "")
+{
+	if (!ui::section(x, y, w, title, open, detail)) return false;
+	settings_save();
+	return true;
+}
+
+// Per level (shown building, or all): floor area, wall length, rooms; then the totals.
+fn float measurements(float x, float y, float w)
+{
+	float ta = 0;
+	float tw = 0;
+	int tr = 0;
+	for (int i = 0; i < model::level_count; i++)
+	{
+		int layer = model::levels[i];
+		float a = 0;
+		float wl = 0;
+		int nr = 0;
+		foreach (&r : model::rooms) if (r.layer == layer && (sel_bld < 0 || r.bld == sel_bld)) { a += r.area; nr++; }
+		foreach (&ww : model::walls) if (ww.layer == layer && !ww.fence && (sel_bld < 0 || ww.bld == sel_bld)) wl += ww.len;
+		if (nr == 0 && wl == 0) continue;
+		ta += a;
+		tw += wl;
+		tr += nr;
+		ui::text_fit(model::level_name(layer), x, y, w, 14, level_on[i] ? ui::FG4 : ui::GRAY);
+		y += 19;
+		ui::text_fit(string::tformat("%.1f m²  ·  %.1f m of walls  ·  %d room%s", a, wl, nr, nr == 1 ? "" : "s"), x + 12, y, w - 12, 12, ui::GRAY);
+		y += 22;
+	}
+	ui::text_fit("Total", x, y, w, 14, ui::FG);
+	y += 19;
+	ui::text_fit(string::tformat("%.1f m²  ·  %.1f m of walls  ·  %d room%s", ta, tw, tr, tr == 1 ? "" : "s"), x + 12, y, w - 12, 12, ui::GRAY);
+	y += 22;
+	return y;
 }
 
 // --- canvas ------------------------------------------------------------------
@@ -644,10 +803,10 @@ fn void draw_sheet(plan::Vec origin, plan::Vec cam_at, float z) => @pool()
 				String s = plan::prim_text(p);
 				plan::Vec at = origin + (plan::vec(p.x, p.y) - cam_at) * z;
 				float tw = ui::text_w(s, size);
-				if (p.vert)
+				if (p.ang != 0)
 				{
 					rl::RLFont* f = ui::sized_font(size);
-					rl::draw_text_pro(*f, s.zstr_tcopy(), v(at), { tw / 2, size / 2 }, -90, ui::text_size(size), 0, p.col);
+					rl::draw_text_pro(*f, s.zstr_tcopy(), v(at), { tw / 2, size / 2 }, p.ang, ui::text_size(size), 0, p.col);
 					continue;
 				}
 				ui::text(s, p.left ? at.x : at.x - tw / 2, at.y - size / 2, size, p.col);
@@ -664,7 +823,9 @@ fn String export_base()
 	char[128] b;
 	txt::slug(&a, txt::view(&model::save_name), "save");
 	txt::slug(&b, txt::view(&model::lots[model::cur_lot].name), "lot");
-	return txt::join(txt::view(&settings.export_dir), string::tformat("%s_%s", txt::view(&a), txt::view(&b)));
+	String f = string::tformat("%s_%s", txt::view(&a), txt::view(&b));
+	if (sel_bld >= 0) f = string::tformat("%s_building-%d", f, sel_bld + 1);
+	return txt::join(txt::view(&settings.export_dir), f);
 }
 
 fn void export_svg() => @pool()

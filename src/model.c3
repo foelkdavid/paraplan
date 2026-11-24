@@ -15,6 +15,7 @@ const MAX_SAVES = 64;
 const MAX_LOTS = 256;
 const MAX_LEVELS = 32;
 const MAX_CATALOGUE = 8192;
+const MAX_BUILDINGS = 64;
 
 struct PathBuf { char[1024] s; }
 
@@ -58,6 +59,8 @@ struct Wall
 	float thick;          // metres
 	int layer;
 	int placed_at;        // PlacedAtHeight: < 0 below the ground (basements)
+	int bld;              // building index, -1 = none (fences, stray bits)
+	float len;            // centre-line length, metres
 }
 
 struct Room
@@ -65,6 +68,10 @@ struct Room
 	long id;
 	int layer;
 	float area;           // m², as the game reports it (wall centre lines)
+	float perim;          // outline length on the wall centre lines, metres
+	int node0;            // first outline node (finds the building)
+	int nseg;             // walls around it
+	int bld;
 	int p0;           // outline in `room_pts` (x, z)
 	int pn;
 	float ax;         // the game's average position
@@ -87,7 +94,18 @@ struct Item
 	int on;               // PlacedOn.Type: 1 wall, 2 floor, 3 item, 0 ground
 	bool flipped;
 	Kind kind;
+	int bld;              // building it stands in / on, -1 = outside every building
 	char[48] name;
+}
+
+// A building: walls connected to each other on one level, stacked levels merged by their overlap.
+struct Building
+{
+	float area;           // m², all levels
+	float wall_len;       // metres of wall (centre lines), all levels
+	float angle;          // dominant wall direction in sheet coords (x, -z), radians in (-pi/4, pi/4]
+	int rooms;
+	int levels;
 }
 
 // discovery
@@ -114,6 +132,8 @@ List{Item} items;
 int[MAX_LEVELS] levels;
 int level_count;
 int ground = 0;       // index into levels of the ground floor
+Building[MAX_BUILDINGS] buildings;
+int building_count;
 
 // item catalogue (game install Main.mod/Settings/Items.setting): GUID -> internal name like "DoorHalfLite2Panel"
 struct CatName { long guid; char[48] name; }
@@ -478,6 +498,7 @@ fn void clear_lot()
 	room_pts.clear();
 	items.clear();
 	level_count = 0;
+	building_count = 0;
 }
 
 fn int node_index(HashMap{long, int}* ids, long id) => ids.get(id) ?? -1;
@@ -562,7 +583,7 @@ fn bool load_lot(int index) => @pool()
 		Object* segs = sub(o, "SegmentInstanceIDs");
 		sz ns = count(segs);
 		if (ns < 3) continue;
-		Room r = { .id = lng(o, "InstanceID"), .layer = (int)lng(o, "Layer"), .area = num(o, "SurfaceArea") };
+		Room r = { .id = lng(o, "InstanceID"), .layer = (int)lng(o, "Layer"), .area = num(o, "SurfaceArea"), .node0 = -1, .bld = -1 };
 		Object* ap = sub(o, "AveragePosition");
 		r.ax = num(ap, "x");
 		r.az = num(ap, "z");
@@ -572,6 +593,8 @@ fn bool load_lot(int index) => @pool()
 			Object* so = segs.get_at(s);
 			int first = node_index(&ids, lng(so, "FirstNodeEntityInstanceID"));
 			if (first < 0) continue;
+			if (r.node0 < 0) r.node0 = first;
+			r.nseg++;
 			room_pts.push(node_pos(first));
 			int wi = wall_ids.get(lng(so, "SegmentEntityInstanceID")) ?? -1;
 			if (wi < 0 || !walls[wi].curved) continue;
@@ -614,6 +637,7 @@ fn bool load_lot(int index) => @pool()
 		items.push(it);
 	}
 	foreach (&r : rooms) guess_room_name(r);
+	find_buildings();
 	// Ground floor: the lowest level whose walls mostly stand at or above the ground.
 	ground = 0;
 	for (int i = 0; i < level_count; i++)
@@ -684,4 +708,211 @@ fn String level_name(int layer)
 		case -1: return "Basement";
 		default: return rel < 0 ? string::tformat("Basement %d", -rel) : string::tformat("Floor %d", rel);
 	}
+}
+
+fn float poly_len(float[<2>][] p)
+{
+	float l = 0;
+	for (sz i = 0; i < p.len; i++) l += (p[(i + 1) % p.len] - p[i]).length();
+	return l;
+}
+
+fn float wall_length(Wall* w)
+{
+	float[<2>] a = node_pos(w.a);
+	float[<2>] b = node_pos(w.b);
+	if (!w.curved) return (b - a).length();
+	float l = 0;
+	float[<2>] prev = a;
+	for (int i = 1; i <= CURVE_STEPS; i++)
+	{
+		float[<2>] q = bez(a, { w.cx, w.cz }, b, (float)i / CURVE_STEPS);
+		l += (q - prev).length();
+		prev = q;
+	}
+	return l;
+}
+
+fn int uf_find(int[] p, int i)
+{
+	while (p[i] != i) { p[i] = p[p[i]]; i = p[i]; }
+	return i;
+}
+
+fn void uf_join(int[] p, int a, int b)
+{
+	a = uf_find(p, a);
+	b = uf_find(p, b);
+	if (a != b) p[a] = b;
+}
+
+// Buildings: (1) walls joined at nodes form one piece per level; (2) pieces merge when one sits on top of the
+// other (different levels, boxes overlap by 30 % of the smaller) or inside it (same level, 90 %: a free-standing
+// wall in a room). Rooms follow their first node, items the room they stand in, else the nearest wall (< 1.5 m).
+// Buildings are numbered by floor area, largest first.
+fn void find_buildings() => @pool()
+{
+	building_count = 0;
+	sz nn = nodes.len();
+	foreach (&r : rooms) { r.bld = -1; r.perim = poly_len(room_poly(r)); }
+	foreach (&w : walls) { w.bld = -1; w.len = wall_length(w); }
+	foreach (&it : items) it.bld = -1;
+	if (!nn) return;
+	int[] parent = mem::talloc_array(int, nn);
+	for (sz i = 0; i < nn; i++) parent[i] = (int)i;
+	foreach (&w : walls) if (!w.fence) uf_join(parent, w.a, w.b);
+	// piece boxes, keyed by root node
+	float[<4>][] box = mem::talloc_array(float[<4>], nn);   // x0 z0 x1 z1
+	int[] layer = mem::talloc_array(int, nn);
+	bool[] used = mem::talloc_array(bool, nn);
+	for (sz i = 0; i < nn; i++) { box[i] = { 1e9, 1e9, -1e9, -1e9 }; used[i] = false; }
+	foreach (&w : walls)
+	{
+		if (w.fence) continue;
+		int r = uf_find(parent, w.a);
+		used[r] = true;
+		layer[r] = w.layer;
+		foreach (n : (int[2]){ w.a, w.b })
+		{
+			box[r].x = math::min(box[r].x, nodes[n].x);
+			box[r].y = math::min(box[r].y, nodes[n].z);
+			box[r].z = math::max(box[r].z, nodes[n].x);
+			box[r].w = math::max(box[r].w, nodes[n].z);
+		}
+	}
+	// merge pieces (repeat until stable: merged boxes grow)
+	int[] group = mem::talloc_array(int, nn);
+	for (sz i = 0; i < nn; i++) group[i] = (int)i;
+	bool changed = true;
+	while (changed)
+	{
+		changed = false;
+		for (sz i = 0; i < nn; i++)
+		{
+			if (!used[i]) continue;
+			for (sz j = i + 1; j < nn; j++)
+			{
+				if (!used[j] || uf_find(group, (int)i) == uf_find(group, (int)j)) continue;
+				float[<4>] a = box[i];
+				float[<4>] b = box[j];
+				float ox = math::min(a.z, b.z) - math::max(a.x, b.x);
+				float oz = math::min(a.w, b.w) - math::max(a.y, b.y);
+				if (ox <= 0 || oz <= 0) continue;
+				float sa = math::max((a.z - a.x) * (a.w - a.y), 1e-4f);
+				float sb = math::max((b.z - b.x) * (b.w - b.y), 1e-4f);
+				float frac = ox * oz / math::min(sa, sb);
+				if (frac >= (layer[i] == layer[j] ? 0.9f : 0.3f)) { uf_join(group, (int)i, (int)j); changed = true; }
+			}
+		}
+	}
+	// group root -> provisional building number
+	int[] num_of = mem::talloc_array(int, nn);
+	for (sz i = 0; i < nn; i++) num_of[i] = -1;
+	int count = 0;
+	for (sz i = 0; i < nn; i++)
+	{
+		if (!used[i]) continue;
+		int g = uf_find(group, (int)i);
+		if (num_of[g] < 0 && count < MAX_BUILDINGS) num_of[g] = count++;
+	}
+	Building[MAX_BUILDINGS] b;
+	uint[MAX_BUILDINGS] lv;            // level bits
+	foreach (&w : walls)
+	{
+		if (w.fence) continue;
+		w.bld = num_of[uf_find(group, uf_find(parent, w.a))];
+		if (w.bld < 0) continue;
+		b[w.bld].wall_len += w.len;
+	}
+	foreach (&r : rooms)
+	{
+		if (r.node0 < 0) continue;
+		int ni = r.node0;
+		int g = used[uf_find(parent, ni)] ? num_of[uf_find(group, uf_find(parent, ni))] : -1;
+		r.bld = g;
+		if (g < 0) continue;
+		b[g].area += r.area;
+		b[g].rooms++;
+	}
+	foreach (&w : walls) if (w.bld >= 0) lv[w.bld] |= 1u << (uint)math::clamp(level_slot(w.layer), 0, 31);
+	foreach (&it : items)
+	{
+		float[<2>] p = { it.x, it.z };
+		foreach (&r : rooms) if (r.bld >= 0 && r.layer == it.layer && inside(room_poly(r), p)) { it.bld = r.bld; break; }
+		if (it.bld >= 0) continue;
+		float best = 1.5f;
+		foreach (&w : walls)
+		{
+			if (w.bld < 0 || w.layer != it.layer) continue;
+			float[<2>] a = node_pos(w.a);
+			float[<2>] d = node_pos(w.b) - a;
+			float l2 = d.dot(d);
+			float u = l2 > 0 ? math::clamp((p - a).dot(d) / l2, 0.0f, 1.0f) : 0;
+			float dist = (a + d * u - p).length();
+			if (dist < best) { best = dist; it.bld = w.bld; }
+		}
+	}
+	for (int i = 0; i < count; i++)
+	{
+		b[i].angle = main_angle(i);
+		for (uint k = lv[i]; k; k &= k - 1) b[i].levels++;
+	}
+	// largest first
+	int[MAX_BUILDINGS] order;
+	for (int i = 0; i < count; i++) order[i] = i;
+	for (int i = 1; i < count; i++)
+	{
+		int v = order[i];
+		int j = i;
+		while (j > 0 && key(&b[order[j - 1]]) < key(&b[v])) { order[j] = order[j - 1]; j--; }
+		order[j] = v;
+	}
+	int[MAX_BUILDINGS] rank;
+	for (int i = 0; i < count; i++) { rank[order[i]] = i; buildings[i] = b[order[i]]; }
+	foreach (&w : walls) if (w.bld >= 0) w.bld = rank[w.bld];
+	foreach (&r : rooms) if (r.bld >= 0) r.bld = rank[r.bld];
+	foreach (&it : items) if (it.bld >= 0) it.bld = rank[it.bld];
+	building_count = count;
+}
+
+// Wall direction (modulo 90°, sheet coords) carried by the most wall length (straight walls within ±2°), refined
+// to the length-weighted mean of those walls. Odd shapes follow their longest run, not an average of every wall.
+fn float main_angle(int bld)
+{
+	float best = 0;
+	float[<2>] best_dir = { 1, 0 };
+	foreach (&w : walls)
+	{
+		if (w.bld != bld || w.curved || w.len < 0.05f) continue;
+		float a = dir4(w);
+		float support = 0;
+		float[<2>] sum = {};
+		foreach (&v : walls)
+		{
+			if (v.bld != bld || v.curved || v.len < 0.05f) continue;
+			float c = dir4(v);
+			float diff = math::abs(math::atan2(math::sin(c - a), math::cos(c - a)));   // in 4x angle space
+			if (diff > 4 * 2 * (float)math::PI / 180) continue;
+			support += v.len;
+			sum += { math::cos(c) * v.len, math::sin(c) * v.len };
+		}
+		if (support > best + 1e-4f) { best = support; best_dir = sum; }
+	}
+	float ang = math::atan2(best_dir.y, best_dir.x) / 4;
+	return math::abs(ang) < 0.002f ? 0 : ang;
+}
+
+// 4 × the wall's direction on the sheet (x, -z): walls at 90° to each other agree.
+fn float dir4(Wall* w)
+{
+	float[<2>] d = node_pos(w.b) - node_pos(w.a);
+	return math::atan2(-d.y, d.x) * 4;
+}
+
+fn float key(Building* b) => b.area * 1000 + b.wall_len;
+
+fn int level_slot(int layer)
+{
+	for (int i = 0; i < level_count; i++) if (levels[i] == layer) return i;
+	return 0;
 }

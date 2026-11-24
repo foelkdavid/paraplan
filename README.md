@@ -14,6 +14,15 @@ real thickness, doors with swings, windows, arches, stairs (and the stair openin
 room names with areas, overall dimensions, a title block and a scale bar. All levels of a building sit side by
 side on one sheet.
 
+- **Several buildings on one lot** are found on their own (walls joined to each other, stacked storeys merged):
+  show all of them, or pick one (sidebar BUILDINGS, or `B`) for a sheet and totals of just that building.
+- **Turned buildings**: with *Align to the building*, a single building is drawn with its walls along the paper,
+  so dimensions are real lengths and widths.
+- **Lengths**: *Wall lengths* writes every wall's length beside it (centre line) and the wall total per level;
+  *Room perimeters* adds the length around each room. The MEASUREMENTS section lists area, wall length and rooms
+  per level and in total; a clicked room shows its perimeter.
+- Every sidebar section folds away (click its heading); options and folds are remembered.
+
 - **SVG** at true paper size (1:50, 1:100 or 1:200): print at 100 % and measure with a ruler.
 - **PNG** at 300 dpi of the same sheet (max 8000 px, 2× supersampled).
 
@@ -57,7 +66,7 @@ c3c build uninstall --trust=full                                   # uninstall
 paraplan                              # opens the last save (or the first one Steam has)
 paraplan "path/to/Save File 1.saved"  # a save folder
 paraplan some.lot                     # a single lot (e.g. the game's Main.mod/PremadeLots/*.lot)
-paraplan --export DIR SAVE            # every building as SVG + PNG into DIR, then quit
+paraplan --export DIR SAVE            # every lot (and each of its buildings) as SVG + PNG into DIR, then quit
 ```
 
 Pick a building in the sidebar, choose levels, scale and what to show, then export with the SVG / PNG buttons

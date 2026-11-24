@@ -64,7 +64,7 @@ fn bool write(String file) => @pool()
 				s.appendf("<text x=\"%.4f\" y=\"%.4f\" font-size=\"%.4f\" fill=\"%s\" text-anchor=\"%s\" dominant-baseline=\"central\"",
 					p.x, p.y, p.size, hex(p.col), p.left ? "start" : "middle");
 				if (p.bold) s.append(" font-weight=\"bold\"");
-				if (p.vert) s.appendf(" transform=\"rotate(-90 %.4f %.4f)\"", p.x, p.y);
+				if (p.ang != 0) s.appendf(" transform=\"rotate(%.2f %.4f %.4f)\"", p.ang, p.x, p.y);
 				s.append(">");
 				escape(&s, plan::prim_text(p));
 				s.append("</text>\n");

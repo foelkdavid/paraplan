@@ -26,7 +26,7 @@ struct Prim
 	bool closed;
 	bool bold;
 	bool left;          // TEXT: left aligned at x (else centred)
-	bool vert;          // TEXT: rotated 90° counter-clockwise
+	float ang;          // TEXT: rotation in degrees, clockwise on the sheet (y down), about (x, y)
 	int p0;
 	int pn;
 	int t0;
@@ -47,6 +47,10 @@ struct Options
 	bool furniture;
 	bool dims;
 	bool labels;
+	bool wall_lens;     // length of every wall + wall totals per level
+	bool perims;        // room perimeters under the areas
+	bool align;         // one building: turn the sheet so its walls run along the paper
+	int bld;            // building to draw, -1 = all
 	bool[model::MAX_LEVELS] level_on;
 }
 
@@ -192,17 +196,23 @@ fn String prim_text(Prim* p) => text.str_view()[p.s0:p.sn];
 fn Vec[] prim_pts(Prim* p) => pts.array_view()[p.p0:p.pn];
 fn Vec[] prim_tris(Prim* p) => tris.array_view()[p.t0:p.tn];
 
-// World (x, z) -> sheet, for the level being drawn.
+// World (x, z) -> sheet, for the level being drawn: y = -z, turned by the sheet rotation (rc, rs), then moved.
 float ox, oy;
-fn Vec at(float x, float z) => { x + ox, -z + oy };
-fn Vec atv(Vec w) => { w.x + ox, -w.y + oy };
+float rc = 1;
+float rs = 0;
+fn Vec turn(Vec p) => { p.x * rc - p.y * rs, p.x * rs + p.y * rc };
+fn Vec flat(float x, float z) => turn({ x, -z });
+fn Vec at(float x, float z) => flat(x, z) + { ox, oy };
+fn Vec atv(Vec w) => at(w.x, w.y);
+
+fn bool shown(int bld) => opt.bld < 0 || bld == opt.bld;
 
 fn Vec rot(float ang, float lx, float lz)
 {
 	// Unity: local x -> (cos, -sin), local z -> (sin, cos) in world x/z; sheet y = -z.
 	float c = math::cos(ang);
 	float s = math::sin(ang);
-	return { lx * c + lz * s, -(-lx * s + lz * c) };
+	return turn({ lx * c + lz * s, -(-lx * s + lz * c) });
 }
 
 // Sheet-space corners of an item's footprint (centre + local half extents).
@@ -223,10 +233,10 @@ fn Box level_extent(int layer)
 	Box b = { 1e9, 1e9, -1e9, -1e9 };
 	foreach (&w : model::walls)
 	{
-		if (w.layer != layer || w.fence) continue;   // garden fences would stretch the sheet to the whole lot
+		if (w.layer != layer || w.fence || !shown(w.bld)) continue;   // garden fences would stretch the sheet to the whole lot
 		float h = w.thick * 0.5f;
-		Vec a = { model::nodes[w.a].x, -model::nodes[w.a].z };
-		Vec c = { model::nodes[w.b].x, -model::nodes[w.b].z };
+		Vec a = flat(model::nodes[w.a].x, model::nodes[w.a].z);
+		Vec c = flat(model::nodes[w.b].x, model::nodes[w.b].z);
 		grow(&b, a - { h, h });
 		grow(&b, a + { h, h });
 		grow(&b, c - { h, h });
@@ -236,15 +246,15 @@ fn Box level_extent(int layer)
 			for (int i = 1; i < model::CURVE_STEPS; i++)
 			{
 				Vec q = model::bez({ model::nodes[w.a].x, model::nodes[w.a].z }, { w.cx, w.cz }, { model::nodes[w.b].x, model::nodes[w.b].z }, (float)i / model::CURVE_STEPS);
-				grow(&b, { q.x - h, -q.y - h });
-				grow(&b, { q.x + h, -q.y + h });
+				grow(&b, flat(q.x, q.y) - { h, h });
+				grow(&b, flat(q.x, q.y) + { h, h });
 			}
 		}
 	}
 	foreach (&r : model::rooms)
 	{
-		if (r.layer != layer) continue;
-		foreach (p : model::room_poly(r)) grow(&b, { p.x, -p.y });
+		if (r.layer != layer || !shown(r.bld)) continue;
+		foreach (p : model::room_poly(r)) grow(&b, flat(p.x, p.y));
 	}
 	return b;
 }
@@ -254,7 +264,7 @@ fn bool in_box(Box b, Vec p) => p.x >= b.x0 - 0.3f && p.x <= b.x1 + 0.3f && p.y 
 fn int node_degree(int node, int layer)
 {
 	int d;
-	foreach (&w : model::walls) if (w.layer == layer && !w.fence && (w.a == node || w.b == node)) d++;
+	foreach (&w : model::walls) if (w.layer == layer && !w.fence && shown(w.bld) && (w.a == node || w.b == node)) d++;
 	return d;
 }
 
@@ -263,6 +273,9 @@ fn void build(Options o, String title, String subtitle) => @pool()
 {
 	opt = o;
 	k = (float)o.scale / 1000;
+	float turn_by = o.align && o.bld >= 0 && o.bld < model::building_count ? -model::buildings[o.bld].angle : 0;
+	rc = math::cos(turn_by);
+	rs = math::sin(turn_by);
 	reset();
 	cur_level = -1;
 	float margin = 15 * k;
@@ -288,14 +301,33 @@ fn void build(Options o, String title, String subtitle) => @pool()
 		// level caption under the drawing (below the dimension line)
 		float cy = y + h + dim_room + 9 * k;
 		float total = 0;
-		foreach (&r : model::rooms) if (r.layer == layer) total += r.area;
+		float wl = 0;
+		foreach (&r : model::rooms) if (r.layer == layer && shown(r.bld)) total += r.area;
+		foreach (&w : model::walls) if (w.layer == layer && !w.fence && shown(w.bld)) wl += w.len;
 		label(model::level_name(layer), x + (b.x1 - b.x0) / 2, cy, 4.2f, INK, true);
-		label(string::tformat("%.1f m²", total), x + (b.x1 - b.x0) / 2, cy + 6.5f * k, 3, SOFT);
+		String cap = o.wall_lens ? string::tformat("%.1f m²  ·  %.1f m of walls", total, wl) : string::tformat("%.1f m²", total);
+		label(cap, x + (b.x1 - b.x0) / 2, cy + 6.5f * k, 3, SOFT);
 		bottom = math::max(bottom, cy + 10 * k);
 		x += b.x1 - b.x0 + gap + dim_room;
 	}
 	cur_level = -1;
-	sheet_w = math::max(x - gap - dim_room + margin + dim_room, 180 * k);
+	// wide enough for the header: title / subtitle on the left, scale bar (<= 10 m + its labels) on the right
+	float head_w = math::max((float)title.len * 7 * 0.62f, (float)subtitle.len * 3.2f * 0.62f) * k + (o.scale <= 50 ? 2 : o.scale >= 200 ? 10 : 5) + 20 * k;
+	float content_w = x - gap - dim_room + margin + dim_room;
+	sheet_w = math::max(math::max(content_w, 180 * k), head_w + 2 * margin);
+	// a sheet made wider than its drawings (by the header): centre the drawings
+	float shift = (sheet_w - content_w) / 2;
+	if (shift > 0)
+	{
+		foreach (&p : prims)
+		{
+			if (p.level < 0) continue;
+			foreach (&q : pts.array_view()[p.p0:p.pn]) q.x += shift;
+			foreach (&q : tris.array_view()[p.t0:p.tn]) q.x += shift;
+			p.x += shift;
+		}
+		foreach (&lb : level_box) if (lb.z > 0) lb.x += shift;
+	}
 	sheet_h = bottom + margin + 8 * k;
 	// header: name left, scale + scale bar right
 	float hx = margin;
@@ -341,7 +373,7 @@ fn void draw_level(int layer, Box b)
 	// 1. rooms
 	foreach (i, &r : model::rooms)
 	{
-		if (r.layer != layer) continue;
+		if (r.layer != layer || !shown(r.bld)) continue;
 		@pool()
 		{
 			Vec[] poly = mem::talloc_array(Vec, r.pn);
@@ -353,6 +385,7 @@ fn void draw_level(int layer, Box b)
 	// 2. furniture and stairs (under the walls)
 	foreach (&it : model::items)
 	{
+		if (!shown(it.bld)) continue;
 		if (it.kind == STAIRS && (it.layer == layer || it.layer == layer - 1)) stairs(it, it.layer != layer);
 		if (it.kind != FURNITURE || it.layer != layer || !opt.furniture || it.on != 2) continue;
 		if (it.dx < 0.15f || it.dz < 0.15f) continue;
@@ -367,19 +400,19 @@ fn void draw_level(int layer, Box b)
 		if (w.fence)
 		{
 			// only fences at the building (railings, porches), not the lot's garden fence
-			Vec fa = { model::nodes[w.a].x, -model::nodes[w.a].z };
-			Vec fb = { model::nodes[w.b].x, -model::nodes[w.b].z };
+			Vec fa = flat(model::nodes[w.a].x, model::nodes[w.a].z);
+			Vec fb = flat(model::nodes[w.b].x, model::nodes[w.b].z);
 			if (in_box(b, fa) && in_box(b, fb)) fence(w);
 			continue;
 		}
-		wall(w);
+		if (shown(w.bld)) wall(w);
 	}
 	// joints: fill the wedge between walls meeting at an angle
 	foreach (ni, &n : model::nodes)
 	{
 		float t = 0;
 		int deg = 0;
-		foreach (&w : model::walls) if (w.layer == layer && !w.fence && (w.a == ni || w.b == ni)) { deg++; t = math::max(t, w.thick); }
+		foreach (&w : model::walls) if (w.layer == layer && !w.fence && shown(w.bld) && (w.a == ni || w.b == ni)) { deg++; t = math::max(t, w.thick); }
 		if (deg < 2) continue;
 		Vec[12] c;
 		for (int i = 0; i < 12; i++) c[i] = at(n.x, n.z) + vec(math::cos((float)i * (float)math::PI / 6), math::sin((float)i * (float)math::PI / 6)) * (t * 0.5f);
@@ -388,20 +421,38 @@ fn void draw_level(int layer, Box b)
 	// 4. openings
 	foreach (&it : model::items)
 	{
-		if (it.layer != layer || it.on != 1) continue;
+		if (it.layer != layer || it.on != 1 || !shown(it.bld)) continue;
 		if (it.kind == DOOR || it.kind == WINDOW || it.kind == ARCH) opening(it, layer);
 	}
 	// 5. labels
-	if (opt.labels)
+	if (opt.labels || opt.perims)
 	{
 		foreach (&r : model::rooms)
 		{
-			if (r.layer != layer || r.area < 1.5f) continue;   // closets, porch slivers: no room for a label
+			if (r.layer != layer || r.area < 1.5f || !shown(r.bld)) continue;   // closets, porch slivers: no room for a label
 			Vec c = label_point(r);
 			float s = r.area < 4 ? 0.75f : 1;
-			label(txt::view(&r.name), c.x, c.y - 2.2f * k * s, 3.4f * s, INK, true);
-			label(string::tformat("%.1f m²", r.area), c.x, c.y + 2.6f * k * s, 2.8f * s, SOFT);
+			if (opt.labels && opt.perims)
+			{
+				label(txt::view(&r.name), c.x, c.y - 3.6f * k * s, 3.4f * s, INK, true);
+				label(string::tformat("%.1f m²", r.area), c.x, c.y + 1.0f * k * s, 2.8f * s, SOFT);
+				label(string::tformat("perimeter %.2f m", r.perim), c.x, c.y + 4.8f * k * s, 2.6f * s, SOFT);
+			}
+			else if (opt.labels)
+			{
+				label(txt::view(&r.name), c.x, c.y - 2.2f * k * s, 3.4f * s, INK, true);
+				label(string::tformat("%.1f m²", r.area), c.x, c.y + 2.6f * k * s, 2.8f * s, SOFT);
+			}
+			else
+			{
+				label(string::tformat("perimeter %.2f m", r.perim), c.x, c.y, 2.6f * s, SOFT);
+			}
 		}
+	}
+	// 5b. the length of every wall, beside it (outside the building where there is an outside)
+	if (opt.wall_lens)
+	{
+		foreach (&w : model::walls) if (w.layer == layer && !w.fence && shown(w.bld)) wall_length_label(w);
 	}
 	// 6. overall dimensions
 	if (opt.dims)
@@ -413,6 +464,40 @@ fn void draw_level(int layer, Box b)
 		dimension({ x0, y1 }, { x1, y1 }, { 0, 1 }, 10 * k);
 		dimension({ x1, y0 }, { x1, y1 }, { 1, 0 }, 10 * k);
 	}
+}
+
+// Centre-line length along the wall, on the side that is not inside a room (else the left side), kept upright.
+fn void wall_length_label(model::Wall* w)
+{
+	if (w.len < 0.25f) return;
+	Vec a = model::node_pos(w.a);
+	Vec b = model::node_pos(w.b);
+	Vec m = w.curved ? model::bez(a, { w.cx, w.cz }, b, 0.5f) : (a + b) / 2;
+	Vec d = (b - a).normalize();
+	Vec n = { -d.y, d.x };
+	float h = w.thick * 0.5f;
+	bool in_pos;
+	bool in_neg;
+	foreach (&r : model::rooms)
+	{
+		if (r.layer != w.layer || !shown(r.bld)) continue;
+		if (model::inside(model::room_poly(r), m + n * (h + 0.15f))) in_pos = true;
+		if (model::inside(model::room_poly(r), m - n * (h + 0.15f))) in_neg = true;
+	}
+	float side = in_pos && !in_neg ? -1 : 1;
+	Vec p = atv(m + n * side * (h + 2.0f * k));
+	Vec sa = at(a.x, a.y);
+	Vec sb = at(b.x, b.y);
+	float deg = math::atan2(sb.y - sa.y, sb.x - sa.x) * 180 / (float)math::PI;
+	if (deg > 90.5f) deg -= 180;
+	if (deg <= -89.5f) deg += 180;
+	Prim* t = add(TEXT, SOFT);
+	text.append(string::tformat("%.2f m", w.len));
+	t.sn = (int)text.len() - t.s0;
+	t.x = p.x;
+	t.y = p.y;
+	t.size = 2.4f * k;
+	t.ang = deg;
 }
 
 // Area-weighted centroid of the room outline; the game's average point if that falls outside.
@@ -559,7 +644,7 @@ fn void door_leaf(model::Item* it, float hinge, float r, float ht)
 	line(&arc, PEN_THIN, INK);
 }
 
-// Stair: outline, treads, walking line with an arrow (up = local +z). `above`: seen from the level above (dashed).
+// Stair: outline, treads, walking line from a dot (bottom, local +z) to an arrow (top, local -z). `above`: seen from the level above (dashed).
 fn void stairs(model::Item* it, bool above)
 {
 	float hw = it.dx / 2;
@@ -574,12 +659,12 @@ fn void stairs(model::Item* it, bool above)
 		seg(item_pt(it, -hw, z), item_pt(it, hw, z), PEN_THIN, STAIR, above);
 	}
 	if (above) return;
-	seg(item_pt(it, 0, -hl + 0.15f), item_pt(it, 0, hl - 0.1f), PEN_THIN, STAIR);
+	seg(item_pt(it, 0, hl - 0.15f), item_pt(it, 0, -hl + 0.1f), PEN_THIN, STAIR);
 	float ah = math::min(0.25f, hw * 0.6f);
-	Vec[3] tip = { item_pt(it, 0, hl - 0.1f), item_pt(it, -ah * 0.6f, hl - 0.1f - ah), item_pt(it, ah * 0.6f, hl - 0.1f - ah) };
+	Vec[3] tip = { item_pt(it, 0, -hl + 0.1f), item_pt(it, -ah * 0.6f, -hl + 0.1f + ah), item_pt(it, ah * 0.6f, -hl + 0.1f + ah) };
 	fill(&tip, STAIR);
 	Vec[12] dot;
-	for (int i = 0; i < 12; i++) dot[i] = item_pt(it, 0, -hl + 0.15f) + vec(math::cos((float)i * (float)math::PI / 6), math::sin((float)i * (float)math::PI / 6)) * 0.05f;
+	for (int i = 0; i < 12; i++) dot[i] = item_pt(it, 0, hl - 0.15f) + vec(math::cos((float)i * (float)math::PI / 6), math::sin((float)i * (float)math::PI / 6)) * 0.05f;
 	fill(&dot, STAIR);
 }
 
@@ -603,6 +688,5 @@ fn void dimension(Vec a, Vec b, Vec side, float off)
 	p.x = m.x;
 	p.y = m.y;
 	p.size = 2.8f * k;
-	p.vert = side.x != 0;
-	if (p.vert) { p.x = a2.x + 2.4f * k; p.y = (a2.y + b2.y) / 2; }
+	if (side.x != 0) { p.ang = -90; p.x = a2.x + 2.4f * k; p.y = (a2.y + b2.y) / 2; }
 }
