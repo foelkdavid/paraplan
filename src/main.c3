@@ -7,7 +7,6 @@ import paraplan::model, paraplan::plan, paraplan::svg;
 // paraplan: Paralives save -> real floor plans (SVG at true scale, PNG). Built on bmu.
 // Run: c3c build && ./build/paraplan [save.saved | lot.lot]      Screenshot: ./build/paraplan --shot out.png
 
-const String VERSION = "0.1.0";
 const int ID_ROOM = 1;
 const int ID_SCALE = 2;
 const int PICK_SAVE = 1;
@@ -788,7 +787,7 @@ fn void help_dialog()
 	if (ui::button({ x + w / 2 + 4, box.y + 54, w / 2 - 4, 36 }, "About", help_tab == 1 ? PRIMARY : NORMAL))
 	{
 		help_tab = 1;
-		ui::about_reset("paraplan", VERSION);
+		ui::about_reset("paraplan", env::PROJECT_VERSION);
 		ui::about_add("Game", txt::empty(&model::game_dir) ? "not found (no item names)" : txt::view(&model::game_dir));
 		ui::about_add("Item names", string::tformat("%d", model::cat_count));
 		ui::about_add("Config", config_dir());

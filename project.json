@@ -1,6 +1,6 @@
 {
   "langrev": "1",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "opt": "O1",
   "build-dir": "build",
   "output": "build",
@@ -10,6 +10,15 @@
       "type": "executable",
       "sources": ["src/**"],
       "dependencies": ["raylib6", "bmu"]
+    },
+    "install": {
+      "type": "prepare",
+      "depends-on": ["paraplan"],
+      "exec": ["python3 install.py install"]
+    },
+    "uninstall": {
+      "type": "prepare",
+      "exec": ["python3 install.py uninstall"]
     }
   }
 }
