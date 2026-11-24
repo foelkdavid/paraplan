@@ -6,6 +6,7 @@ name: release
 on:
   push:
     tags: ["v*"]
+    branches: ["ci-*"]       # test builds without a release
   workflow_dispatch:
 
 permissions:
@@ -22,14 +23,14 @@ jobs:
         include:
           - { os: ubuntu-22.04, name: linux-x64-wayland }
           - { os: windows-latest, name: windows-x64 }
-          - { os: macos-14, name: macos-arm64 }
+          - { os: macos-15, name: macos-arm64 }
           - { os: macos-15-intel, name: macos-x64 }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Fetch bmu (submodule, SSH URL -> HTTPS)
         run: |
@@ -39,6 +40,19 @@ jobs:
       - name: Version
         run: echo "VERSION=$(python3 -c 'import json; print(json.load(open("project.json"))["version"])')" >> "$GITHUB_ENV"
 
+      # `logged CMD...`: on failure the last 80 output lines become one error annotation (readable without a login)
+      - name: Log helper
+        run: |
+          cat > "$HOME/.logged.sh" <<'EOF'
+          logged() {
+            "$@" > "$HOME/.step.log" 2>&1 && { tail -5 "$HOME/.step.log"; return 0; }
+            cat "$HOME/.step.log"
+            tail -80 "$HOME/.step.log" | python3 -c "import sys; t=sys.stdin.read().replace('%','%25').replace('\r','').replace('\n','%0A'); print('::error title=' + sys.argv[1] + '::' + t)" "$1"
+            return 1
+          }
+          EOF
+          echo "BASH_ENV=$HOME/.logged.sh" >> "$GITHUB_ENV"
+
       # --- Linux ---------------------------------------------------------------------------------------------
       - name: Linux toolchain and raylib (Wayland)
         if: runner.os == 'Linux'
@@ -47,12 +61,12 @@ jobs:
           sudo apt-get install -y -q build-essential pkg-config libwayland-dev libwayland-bin wayland-protocols libxkbcommon-dev libegl-dev libgl-dev
           curl -sL "https://github.com/c3lang/c3c/releases/download/${C3_VERSION}/c3-linux.tar.gz" | tar xz -C "$HOME"
           echo "$HOME/c3" >> "$GITHUB_PATH"
-          bmu/dev/tools/build-raylib.sh
+          logged bmu/dev/tools/build-raylib.sh
 
       - name: Linux build
         if: runner.os == 'Linux'
         run: |
-          c3c build paraplan
+          logged c3c build paraplan
           d="paraplan-${VERSION}-${{ matrix.name }}"
           mkdir -p "$d"
           cp build/paraplan README.md paraplan.desktop assets/paraplan.svg "$d/"
@@ -68,14 +82,14 @@ jobs:
           7z x -y -o"$HOME/c3" c3.zip > /dev/null
           c3dir=$(dirname "$(find "$HOME/c3" -name c3c.exe | head -1)")
           echo "$c3dir" >> "$GITHUB_PATH"
-          bmu/dev/tools/build-raylib-other.sh windows
+          logged bmu/dev/tools/build-raylib-other.sh windows
 
       - name: Windows build
         if: runner.os == 'Windows'
         env:
           MSYS2_ARG_CONV_EXCL: "*"   # keep /ENTRY:... as is (Git Bash would turn it into a path)
         run: |
-          c3c build paraplan --win-subsystem=windows -z /ENTRY:mainCRTStartup
+          logged c3c build paraplan --win-subsystem=windows -z /ENTRY:mainCRTStartup
           d="paraplan-${VERSION}-${{ matrix.name }}"
           mkdir -p "$d"
           cp build/paraplan.exe README.md "$d/"
@@ -91,12 +105,12 @@ jobs:
           unzip -q c3.zip -d "$HOME/c3"
           c3dir=$(dirname "$(find "$HOME/c3" -name c3c -type f | head -1)")
           echo "$c3dir" >> "$GITHUB_PATH"
-          bmu/dev/tools/build-raylib-other.sh macos
+          logged bmu/dev/tools/build-raylib-other.sh macos
 
       - name: macOS build (app bundle, ad-hoc signed)
         if: runner.os == 'macOS'
         run: |
-          c3c build paraplan --macos-min-version 11.0
+          logged c3c build paraplan --macos-min-version 11.0
           app=paraplan.app
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp build/paraplan "$app/Contents/MacOS/paraplan"
@@ -121,7 +135,7 @@ jobs:
           ditto -c -k --keepParent "$app" "$d.zip"
           echo "PKG=$d.zip" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.name }}
           path: ${{ env.PKG }}
@@ -131,7 +145,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
