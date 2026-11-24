@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=paraplan
+Comment=Paralives save -> floor plans (SVG, PNG)
+Exec=paraplan %f
+Icon=paraplan
+StartupWMClass=paraplan
+Terminal=false
+Categories=Graphics;Utility;

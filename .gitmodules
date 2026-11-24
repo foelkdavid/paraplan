@@ -1,0 +1,3 @@
+[submodule "bmu"]
+	path = bmu
+	url = git@github.com:foelkdavid/bmu.git
