@@ -23,8 +23,8 @@ jobs:
         include:
           - { os: ubuntu-22.04, name: linux-x64-wayland }
           - { os: windows-latest, name: windows-x64 }
-          - { os: macos-15, name: macos-arm64 }
-          - { os: macos-15-intel, name: macos-x64 }
+          - { os: macos-15, name: macos-arm64, arch: aarch64 }
+          - { os: macos-15, name: macos-x64, arch: x64 }     # c3c for macOS is arm64 only: cross-compiled
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -86,10 +86,8 @@ jobs:
 
       - name: Windows build
         if: runner.os == 'Windows'
-        env:
-          MSYS2_ARG_CONV_EXCL: "*"   # keep /ENTRY:... as is (Git Bash would turn it into a path)
         run: |
-          logged c3c build paraplan --win-subsystem=windows -z /ENTRY:mainCRTStartup
+          logged c3c build paraplan --win-subsystem=windows   # main is @winmain: no console window
           d="paraplan-${VERSION}-${{ matrix.name }}"
           mkdir -p "$d"
           cp build/paraplan.exe README.md "$d/"
@@ -105,12 +103,12 @@ jobs:
           unzip -q c3.zip -d "$HOME/c3"
           c3dir=$(dirname "$(find "$HOME/c3" -name c3c -type f | head -1)")
           echo "$c3dir" >> "$GITHUB_PATH"
-          logged bmu/dev/tools/build-raylib-other.sh macos
+          logged bmu/dev/tools/build-raylib-other.sh macos ${{ matrix.arch }}
 
       - name: macOS build (app bundle, ad-hoc signed)
         if: runner.os == 'macOS'
         run: |
-          logged c3c build paraplan --macos-min-version 11.0
+          logged c3c build paraplan --target macos-${{ matrix.arch }} --macos-min-version 11.0
           app=paraplan.app
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp build/paraplan "$app/Contents/MacOS/paraplan"

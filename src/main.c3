@@ -93,8 +93,9 @@ fn String config_dir()
 	$endif
 	$if env::DARWIN:
 		return txt::join(sys::home(), "Library/Application Support/paraplan");
+	$else
+		return txt::join(sys::home(), ".config/paraplan");
 	$endif
-	return txt::join(sys::home(), ".config/paraplan");
 }
 
 bool batch;     // --export: never write settings
@@ -286,7 +287,7 @@ fn void fit()
 	cam = { plan::sheet_w / 2 - c.width / 2 / zoom, plan::sheet_h / 2 - c.height / 2 / zoom };
 }
 
-fn void main(String[] args)
+fn void main(String[] args) @winmain
 {
 	model::init();
 	plan::init();
