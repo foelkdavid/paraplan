@@ -69,7 +69,7 @@ jobs:
           logged c3c build paraplan
           d="paraplan-${VERSION}-${{ matrix.name }}"
           mkdir -p "$d"
-          cp build/paraplan README.md paraplan.desktop assets/paraplan.svg "$d/"
+          cp build/paraplan README.md LICENSE paraplan.desktop assets/paraplan.svg "$d/"
           cp -r licenses "$d/"
           tar czf "$d.tar.gz" "$d"
           echo "PKG=$d.tar.gz" >> "$GITHUB_ENV"
@@ -90,7 +90,7 @@ jobs:
           logged c3c build paraplan --win-subsystem=windows   # main is @winmain: no console window
           d="paraplan-${VERSION}-${{ matrix.name }}"
           mkdir -p "$d"
-          cp build/paraplan.exe README.md "$d/"
+          cp build/paraplan.exe README.md LICENSE "$d/"
           cp -r licenses "$d/"
           7z a "$d.zip" "$d" > /dev/null
           echo "PKG=$d.zip" >> "$GITHUB_ENV"
@@ -112,7 +112,7 @@ jobs:
           app=paraplan.app
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp build/paraplan "$app/Contents/MacOS/paraplan"
-          cp -r licenses README.md "$app/Contents/Resources/"
+          cp -r licenses README.md LICENSE "$app/Contents/Resources/"
           cat > "$app/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
